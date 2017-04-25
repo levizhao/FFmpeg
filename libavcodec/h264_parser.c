@@ -47,6 +47,13 @@
 #include "mpegutils.h"
 #include "parser.h"
 
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <sys/types.h>          /* See NOTES */
+#include <unistd.h>
+
+
 typedef struct H264ParseContext {
     ParseContext pc;
     H264ParamSets ps;
@@ -62,6 +69,7 @@ typedef struct H264ParseContext {
     int parse_last_mb;
     int64_t reference_dts;
     int last_frame_num, last_picture_structure;
+	int sei_msg_sock;					///< the socket to send out sei message content
 } H264ParseContext;
 
 
@@ -323,6 +331,33 @@ static inline int parse_nal_units(AVCodecParserContext *s,
             break;
         case H264_NAL_SEI:
             ff_h264_sei_decode(&p->sei, &nal.gb, &p->ps, avctx);
+			if (p->sei.unregistered.unreg_size > 0 && p->sei.unregistered.x264_build == 0) {
+				av_log(avctx, AV_LOG_DEBUG, "got unregistered message %lu\n", s->pts);
+				if(p->sei_msg_sock != -1) {
+					/* we should send out the unregisterd message through socket to 127.0.0.1:6123 
+					 * 8 bytes context point
+					 * size bytes of unregisterd message
+					 */	
+					int ctx_len = sizeof(avctx);
+					int pts_len = sizeof(s->pts);
+					int unreg_size = p->sei.unregistered.unreg_size;
+					int msg_len = ctx_len + pts_len + unreg_size;
+					uint8_t* msg = av_malloc(msg_len);
+					if(msg) {
+						struct sockaddr_in remote;
+						remote.sin_family = AF_INET;
+						remote.sin_port = htons(6123);
+						remote.sin_addr.s_addr = inet_addr("127.0.0.1");
+						/// copt avctx pointer, pts, message content to buffer
+						memcpy(msg, &avctx, ctx_len);
+						memcpy(msg + ctx_len, &s->pts, pts_len);
+						memcpy(msg + ctx_len + pts_len, p->sei.unregistered.unreg_msg, unreg_size);
+						av_log(avctx, AV_LOG_DEBUG, "will report %d bytes of message to 127.0.0.1:6123\n", msg_len);
+						sendto(p->sei_msg_sock, msg, msg_len, 0, (struct sockaddr*) &remote, sizeof(remote));
+						av_free(msg);
+					}
+				}
+			}
             break;
         case H264_NAL_IDR_SLICE:
             s->key_frame = 1;
@@ -679,6 +714,11 @@ static void h264_close(AVCodecParserContext *s)
     H264ParseContext *p = s->priv_data;
     ParseContext *pc = &p->pc;
 
+	if(p->sei_msg_sock != -1) {
+		close(p->sei_msg_sock);
+		p->sei_msg_sock = -1;
+	}
+	
     av_freep(&pc->buffer);
 
     ff_h264_sei_uninit(&p->sei);
@@ -692,6 +732,21 @@ static av_cold int init(AVCodecParserContext *s)
     p->reference_dts = AV_NOPTS_VALUE;
     p->last_frame_num = INT_MAX;
     ff_h264dsp_init(&p->h264dsp, 8, 1);
+	
+	
+	if((p->sei_msg_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) != -1) {
+		/// bind
+		struct sockaddr_in local;
+		local.sin_family = AF_INET;
+		local.sin_port = 0;
+		local.sin_addr.s_addr = inet_addr("127.0.0.1");
+		if( bind(p->sei_msg_sock , (struct sockaddr*)&local, sizeof(local) ) == -1) {
+			close(p->sei_msg_sock);
+			p->sei_msg_sock = -1;
+		}
+	} else {
+		p->sei_msg_sock = -1;
+	}
     return 0;
 }
 

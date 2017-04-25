@@ -53,6 +53,13 @@ void ff_h264_sei_uninit(H264SEIContext *h)
 
     h->a53_caption.a53_caption_size = 0;
     av_freep(&h->a53_caption.a53_caption);
+	
+	h->unregistered.unreg_size 	   = 0;
+	h->unregistered.x264_build	   = 0;
+	if(h->unregistered.unreg_msg) {
+		av_free(h->unregistered.unreg_msg);
+		h->unregistered.unreg_msg = 0;
+	}
 }
 
 static int decode_picture_timing(H264SEIPictureTiming *h, GetBitContext *gb,
@@ -243,7 +250,7 @@ static int decode_unregistered_user_data(H264SEIUnregistered *h, GetBitContext *
     if (size < 16 || size >= INT_MAX - 16)
         return AVERROR_INVALIDDATA;
 
-    user_data = av_malloc(16 + size + 1);
+    user_data = h->unreg_msg = av_malloc(16 + size + 1);
     if (!user_data)
         return AVERROR(ENOMEM);
 
@@ -259,8 +266,9 @@ static int decode_unregistered_user_data(H264SEIUnregistered *h, GetBitContext *
 
     if (strlen(user_data + 16) > 0)
         av_log(logctx, AV_LOG_DEBUG, "user data:\"%s\"\n", user_data + 16);
-
-    av_free(user_data);
+	
+	h->unreg_size = size + 16 + 1;
+    ///av_free(user_data);
     return 0;
 }
 
